@@ -1,12 +1,11 @@
-import { isBefore, subHours } from 'date-fns';
 import User from '../models/User';
 import File from '../models/File';
 import Appointment from '../models/Appointment';
 
-import CancellationMail from '../jobs/CancellationMails';
-import Queue from '../../lib/Queue';
-
 import CreateAppointmentService from '../services/CreateAppointmentService';
+import CancelAppointmentService from '../services/CancelAppointmentService';
+
+import Cache from '../../lib/Cache';
 
 class AppointmentController {
   async store(req, res) {
@@ -27,6 +26,14 @@ class AppointmentController {
 
   async index(req, res) {
     const { page = 1 } = req.query;
+
+    const cacheKey = `user:${req.userId}:appointments:${page}`;
+
+    const cached = await Cache.get(cacheKey);
+
+    if (cached) {
+      return res.json(cached);
+    }
 
     const appointments = await Appointment.findAll({
       where: {
@@ -49,51 +56,15 @@ class AppointmentController {
       },
     });
 
-    res.json(appointments);
+    Cache.set(cacheKey, appointments);
+
+    return res.json(appointments);
   }
 
   async delete(req, res) {
-    const appointment = await Appointment.findByPk(req.params.id, {
-      include: [
-        {
-          model: User,
-          as: 'provider',
-          attributes: ['name', 'email'],
-        },
-        {
-          model: User,
-          as: 'user',
-          attributes: ['name'],
-        },
-      ],
-    });
-
-    if (!appointment) {
-      return res.status(400).json({
-        error: 'Appointment doesnt exist',
-      });
-    }
-
-    if (appointment.user_id !== req.userId) {
-      return res.status(400).json({
-        error: 'You dont have permission to cancel other peoples appointment',
-      });
-    }
-
-    const dateWithSub = subHours(appointment.date, 2);
-
-    if (isBefore(dateWithSub, new Date())) {
-      return res.status(401).json({
-        error: 'You can only cancel appointments two hours in advance',
-      });
-    }
-
-    appointment.canceled_at = new Date();
-
-    appointment.save();
-
-    await Queue.add(CancellationMail.key, {
-      appointment,
+    const appointment = await CancelAppointmentService.run({
+      user_id: req.userId,
+      appointment_id: req.params.id,
     });
 
     return res.json(appointment);
